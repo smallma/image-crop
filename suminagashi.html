@@ -156,16 +156,20 @@
   const FILTER = gl.LINEAR;
 
   /* ───────────────────────── config ───────────────────────── */
+  const isMobile = window.matchMedia("(pointer: coarse)").matches ||
+                   Math.min(window.innerWidth, window.innerHeight) < 760;
+  const DPR_CAP = isMobile ? 1.25 : 2.0;
+
   const config = {
-    SIM_RES: 196,
-    DYE_RES: 1024,
-    PRESSURE_ITERS: 22,
-    VEL_DISSIPATION: 0.62,     // per second
-    DYE_DISSIPATION: 0.42,     // slow — ink lingers like a stain
-    CURL: 24.0,                // vorticity confinement → swirls
-    SPLAT_RADIUS: 0.0018,
-    SPLAT_FORCE: 6200,
-    INK_STRENGTH: 1.35,        // Beer-Lambert absorbance scale
+    SIM_RES: isMobile ? 132 : 196,
+    DYE_RES: isMobile ? 600 : 1024,
+    PRESSURE_ITERS: isMobile ? 18 : 22,
+    VEL_DISSIPATION: 0.55,     // per second
+    DYE_DISSIPATION: 0.30,     // slow — ink lingers like a stain
+    CURL: 26.0,                // vorticity confinement → swirls
+    SPLAT_RADIUS: 0.0022,
+    SPLAT_FORCE: 6000,
+    INK_STRENGTH: 1.6,         // Beer-Lambert absorbance scale
   };
 
   /* ───────────────────────── inks ─────────────────────────── */
@@ -322,13 +326,13 @@
     outColor = value * texture(uTexture, vUv);
   }`;
 
-  // Final composite: procedural washi paper + Beer–Lambert ink staining + vignette
-  const displayFrag = `#version 300 es
+  // Paper is procedural but STATIC — baked once into a texture so the
+  // per-frame display pass stays cheap (critical for mobile fill-rate).
+  // rgb = paper colour, a = local "soak" factor for uneven absorption.
+  const paperFrag = `#version 300 es
   precision highp float;
   in vec2 vUv; out vec4 outColor;
-  uniform sampler2D uDye;
   uniform vec2 uResolution;
-  uniform float uInkStrength;
 
   float hash(vec2 p){
     p = fract(p * vec2(123.34, 456.21));
@@ -348,7 +352,8 @@
     return v;
   }
 
-  vec3 paper(vec2 uv){
+  void main(){
+    vec2 uv = vUv;
     vec3 base = vec3(0.918, 0.882, 0.802);          // warm pale cream
     float fibreH = fbm(uv * vec2(8.0, 240.0));       // vertical fibres
     float fibreV = fbm(uv * vec2(240.0, 8.0));       // horizontal fibres
@@ -359,17 +364,22 @@
     col -= (fibreV - 0.5) * 0.030;
     col -= (mottle - 0.5) * 0.055;
     col += (grain  - 0.5) * 0.016;
-    return col;
-  }
+    float soak = fbm(uv * 3.2) * 0.5 + 0.75;         // 0.75 .. 1.25
+    outColor = vec4(col, soak);
+  }`;
 
+  // Final composite: sample baked paper + Beer–Lambert ink staining + vignette.
+  const displayFrag = `#version 300 es
+  precision highp float;
+  in vec2 vUv; out vec4 outColor;
+  uniform sampler2D uDye;
+  uniform sampler2D uPaper;
+  uniform float uInkStrength;
   void main(){
     vec3 absorb = texture(uDye, vUv).rgb;
-    vec3 base = paper(vUv);
-    // pull a touch of fibre into the stain so ink "soaks" unevenly
-    float soak = fbm(vUv * 3.2) * 0.35 + 0.82;
-    vec3 trans = exp(-absorb * uInkStrength * soak);
-    vec3 col = base * trans;
-    // very soft vignette
+    vec4 pap = texture(uPaper, vUv);
+    vec3 trans = exp(-absorb * uInkStrength * pap.a);
+    vec3 col = pap.rgb * trans;
     vec2 d = vUv - 0.5;
     float vig = smoothstep(0.95, 0.32, length(d) * 1.15);
     col *= mix(0.9, 1.0, vig);
@@ -411,6 +421,7 @@
     gradient:   program(vShader, gradientFrag),
     splat:      program(vShader, splatFrag),
     clear:      program(vShader, clearFrag),
+    paper:      program(vShader, paperFrag),
     display:    program(vShader, displayFrag),
   };
 
@@ -466,7 +477,7 @@
     };
   }
 
-  let velocity, dye, divergence, curlFBO, pressure;
+  let velocity, dye, divergence, curlFBO, pressure, paperTex;
 
   function initFramebuffers() {
     const simRes = getResolution(config.SIM_RES);
@@ -479,6 +490,18 @@
     divergence = createFBO(simRes.w, simRes.h, r, gl.RED, hf, gl.NEAREST);
     curlFBO    = createFBO(simRes.w, simRes.h, r, gl.RED, hf, gl.NEAREST);
     pressure   = createDouble(simRes.w, simRes.h, r, gl.RED, hf, gl.NEAREST);
+
+    // baked paper at screen resolution (8-bit is plenty, and cheap to sample)
+    const pw = gl.drawingBufferWidth, ph = gl.drawingBufferHeight;
+    paperTex = createFBO(pw, ph, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, FILTER);
+    bakePaper(pw, ph);
+  }
+
+  function bakePaper(w, h) {
+    const u = use(progs.paper);
+    gl.uniform2f(u.texelSize, 0, 0);
+    gl.uniform2f(u.uResolution, w, h);
+    blit(paperTex);
   }
 
   function getResolution(res) {
@@ -579,11 +602,12 @@
     blit(dye.write); dye.swap();
   }
 
-  // a drop: ink + a ring of gentle outward pushes so it blooms organically
+  // a drop: a strong dab of ink + a soft ring of outward pushes so it
+  // blooms organically without being instantly diluted.
   function dropAt(x, y, strength) {
-    splatDye(x, y, 0.16 * strength);
-    const n = 7;
-    const f = 70 * strength;
+    splatDye(x, y, 1.15 * strength);
+    const n = 6;
+    const f = 32 * strength;
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + Math.random() * 0.6;
       splatVelocity(x, y, Math.cos(a) * f, Math.sin(a) * f);
@@ -617,7 +641,7 @@
     const dy = (p.y - prev.y) * config.SPLAT_FORCE;
     if (Math.abs(dx) + Math.abs(dy) > 1.0) {
       splatVelocity(p.x, p.y, dx, dy);
-      splatDye(p.x, p.y, 0.085);
+      splatDye(p.x, p.y, 0.5);
       prev.moved = true;
     }
     prev.x = p.x; prev.y = p.y;
@@ -671,7 +695,7 @@
   function render() {
     const u = use(progs.display);
     gl.uniform1i(u.uDye, dye.read.attach(0));
-    gl.uniform2f(u.uResolution, canvas.width, canvas.height);
+    gl.uniform1i(u.uPaper, paperTex.attach(1));
     gl.uniform1f(u.uInkStrength, config.INK_STRENGTH);
     blit(null);
   }
@@ -698,13 +722,23 @@
   }
 
   /* ───────────────────────── resize ───────────────────────── */
+  // Mobile browsers fire resize when the address bar slides in/out. We must
+  // NOT rebuild the framebuffers for that (it would wipe the artwork), so we
+  // only re-init on first build or a meaningful change (rotation / width).
+  let builtW = 0, builtH = 0;
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
     const w = Math.floor(canvas.clientWidth * dpr);
     const h = Math.floor(canvas.clientHeight * dpr);
+    if (w === 0 || h === 0) return;
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
+    }
+    const widthChanged = Math.abs(w - builtW) > 2;
+    const bigHeightChange = Math.abs(h - builtH) > 180;
+    if (builtW === 0 || widthChanged || bigHeightChange) {
+      builtW = w; builtH = h;
       initFramebuffers();
     }
   }
