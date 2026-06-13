@@ -42,10 +42,13 @@
     z-index:10;
     display:flex;
     align-items:center;
+    flex-wrap:wrap;
+    justify-content:center;
+    row-gap:6px;
     gap:10px;
     padding:8px 12px;
     max-width:calc(100vw - 20px);
-    border-radius:999px;
+    border-radius:22px;
     background:var(--pill-bg);
     border:1px solid var(--pill-stroke);
     box-shadow:0 6px 26px rgba(60,48,30,0.14), inset 0 1px 0 rgba(255,255,255,0.35);
@@ -109,6 +112,32 @@
     .div{ height:18px; }
   }
 
+  .dens{
+    display:flex; align-items:center; gap:7px;
+    color:rgba(50,42,30,0.72);
+    padding:0 4px;
+  }
+  .dens svg{ width:15px; height:15px; display:block; opacity:.85; }
+  .dens input[type="range"]{
+    -webkit-appearance:none; appearance:none;
+    width:84px; height:3px; border-radius:3px;
+    background:rgba(90,74,48,0.30);
+    outline:none; cursor:pointer; margin:0;
+  }
+  .dens input[type="range"]::-webkit-slider-thumb{
+    -webkit-appearance:none; appearance:none;
+    width:15px; height:15px; border-radius:50%;
+    background:#3a322a; border:2px solid rgba(244,238,224,0.85);
+    box-shadow:0 1px 3px rgba(40,30,15,0.35);
+  }
+  .dens input[type="range"]::-moz-range-thumb{
+    width:14px; height:14px; border-radius:50%;
+    background:#3a322a; border:2px solid rgba(244,238,224,0.85);
+  }
+  @media (max-width:430px){
+    .dens input[type="range"]{ width:66px; }
+  }
+
   .nofx{
     position:fixed; inset:0; display:none;
     align-items:center; justify-content:center;
@@ -130,6 +159,11 @@
       <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M8 5.5v13l11-6.5z"/></svg>
     </button>
     <button class="btn wash" id="wash" title="洗い流す">洗い流す</button>
+    <div class="div"></div>
+    <label class="dens" title="濃度">
+      <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/></svg>
+      <input id="dens" type="range" min="0.5" max="3" step="0.05" value="1.25" aria-label="濃度" />
+    </label>
   </div>
 
   <div class="nofx" id="nofx">お使いの端末では WebGL を利用できません。</div>
@@ -164,12 +198,13 @@
     SIM_RES: isMobile ? 132 : 196,
     DYE_RES: isMobile ? 600 : 1024,
     PRESSURE_ITERS: isMobile ? 18 : 22,
-    VEL_DISSIPATION: 0.55,     // per second
-    DYE_DISSIPATION: 0.30,     // slow — ink lingers like a stain
+    VEL_DISSIPATION: 0.6,      // per second
+    DYE_DISSIPATION: 0.32,     // slow — ink lingers like a stain
     CURL: 26.0,                // vorticity confinement → swirls
-    SPLAT_RADIUS: 0.0022,
-    SPLAT_FORCE: 6000,
-    INK_STRENGTH: 1.6,         // Beer-Lambert absorbance scale
+    SPLAT_RADIUS: 0.0009,      // velocity push size
+    DYE_RADIUS: 0.00055,       // ink dab size — smaller = finer strokes
+    SPLAT_FORCE: 3000,
+    INK_STRENGTH: 1.25,        // Beer-Lambert absorbance scale (density slider)
   };
 
   /* ───────────────────────── inks ─────────────────────────── */
@@ -598,16 +633,16 @@
     gl.uniform1f(u.aspectRatio, canvas.width / canvas.height);
     gl.uniform2f(u.point, x, y);
     gl.uniform3f(u.color, ab[0] * amount, ab[1] * amount, ab[2] * amount);
-    gl.uniform1f(u.radius, config.SPLAT_RADIUS * 2.4);
+    gl.uniform1f(u.radius, config.DYE_RADIUS);
     blit(dye.write); dye.swap();
   }
 
-  // a drop: a strong dab of ink + a soft ring of outward pushes so it
-  // blooms organically without being instantly diluted.
+  // a drop: a dab of ink + a soft ring of outward pushes so it blooms
+  // organically without being instantly diluted.
   function dropAt(x, y, strength) {
-    splatDye(x, y, 1.15 * strength);
+    splatDye(x, y, 0.6 * strength);
     const n = 6;
-    const f = 32 * strength;
+    const f = 26 * strength;
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + Math.random() * 0.6;
       splatVelocity(x, y, Math.cos(a) * f, Math.sin(a) * f);
@@ -633,18 +668,36 @@
     lastActivity = performance.now();
   });
 
+  // Stamp ink continuously between the previous and current point so a fast
+  // drag draws an unbroken line instead of disconnected dabs.
+  function strokeTo(prev, x, y) {
+    let dx = x - prev.x, dy = y - prev.y;
+    const dist = Math.hypot(dx, dy);
+    const spacing = 0.007;                       // gap between stamps (UV)
+    const steps = Math.min(64, Math.max(1, Math.ceil(dist / spacing)));
+    const vx = dx * config.SPLAT_FORCE;
+    const vy = dy * config.SPLAT_FORCE;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const sx = prev.x + dx * t;
+      const sy = prev.y + dy * t;
+      splatVelocity(sx, sy, vx, vy);
+      splatDye(sx, sy, 0.28);
+    }
+    prev.x = x; prev.y = y;
+    if (dist > 0.0005) prev.moved = true;
+  }
+
   canvas.addEventListener("pointermove", (e) => {
     const prev = pointers.get(e.pointerId);
     if (!prev) return;
-    const p = pos(e);
-    const dx = (p.x - prev.x) * config.SPLAT_FORCE;
-    const dy = (p.y - prev.y) * config.SPLAT_FORCE;
-    if (Math.abs(dx) + Math.abs(dy) > 1.0) {
-      splatVelocity(p.x, p.y, dx, dy);
-      splatDye(p.x, p.y, 0.5);
-      prev.moved = true;
+    // walk through the points the browser coalesced for a smoother line
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+    if (events && events.length) {
+      for (const ce of events) { const p = pos(ce); strokeTo(prev, p.x, p.y); }
+    } else {
+      const p = pos(e); strokeTo(prev, p.x, p.y);
     }
-    prev.x = p.x; prev.y = p.y;
     lastActivity = performance.now();
   });
 
@@ -778,6 +831,17 @@
     autoBtn.setAttribute("data-on", autoOn ? "1" : "0");
     lastActivity = performance.now();
   });
+
+  const densInput = document.getElementById("dens");
+  config.INK_STRENGTH = parseFloat(densInput.value);
+  const applyDensity = () => {
+    config.INK_STRENGTH = parseFloat(densInput.value);
+    lastActivity = performance.now();
+  };
+  densInput.addEventListener("input", applyDensity);
+  // don't let a drag on the slider also paint / capture the canvas
+  ["pointerdown", "pointermove", "pointerup", "touchstart", "touchmove"]
+    .forEach((ev) => densInput.addEventListener(ev, (e) => e.stopPropagation()));
 
   const washBtn = document.getElementById("wash");
   function setWash(on) {
