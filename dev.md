@@ -182,12 +182,16 @@ offsetX: number
 offsetY: number
 ```
 
-動態位置範圍：
+動態位置範圍依「縮放後圖片填滿輸出框的餘量」計算，確保拖曳不會露出白邊：
 
 ```ts
-const positionLimitX = Math.max(1000, width * 2)
-const positionLimitY = Math.max(1000, height * 2)
+const coverScale = Math.max(width / visualWidth, height / visualHeight)
+const scale = coverScale * (zoom / 100)
+const limitX = Math.max(0, (visualWidth * scale - width) / 2)
+const limitY = Math.max(0, (visualHeight * scale - height) / 2)
 ```
+
+cover 正好貼齊的那一軸餘量為 `0`，需放大縮放（`zoom > 100%`）才有移動空間，此時位置 slider 會鎖定並顯示提示。集中於 `computePanLimits()`，預覽、拖曳、匯出共用同一公式。
 
 預覽畫面會將輸出像素換算為 CSS 百分比：
 
@@ -346,5 +350,5 @@ Vercel Preview 目前可能啟用 Deployment Protection，未登入時會收到 
 - 每張圖片獨立保存所有設定。
 - 預覽與匯出使用相同位置座標。
 - 縮放維持 `1%–250%`。
-- 位置可超過 `±100px`，並依輸出尺寸動態調整。
+- 位置移動範圍依縮放後圖片填滿輸出框的餘量動態計算，拖曳與匯出皆不露白邊。
 - 最小字級 `18px`、對比至少 `4.5:1`。

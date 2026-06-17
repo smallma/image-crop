@@ -149,6 +149,8 @@ label, .label-row label, .form-label { color: var(--text); font-weight: 600; }
 .dimension-row small { position: absolute; right: 9px; bottom: 12px; color: var(--muted); font-size: 18px; }
 .range-group output { color: #cffafe; background: var(--cyan-dark); padding: 4px 8px; border-radius: 6px; min-width: 56px; text-align: center; }
 input[type="range"] { min-height: 44px; width: 100%; accent-color: var(--cyan); }
+input[type="range"]:disabled { accent-color: var(--border-strong); opacity: .5; cursor: not-allowed; }
+.range-hint { display: block; margin-top: 4px; color: var(--muted); font-size: 18px; line-height: 1.4; }
 .export-settings { display: grid; gap: 13px; }
 .select-wrap { position: relative; }
 .select-wrap select { width: 100%; appearance: none; padding: 10px 45px 10px 12px; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }

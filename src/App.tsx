@@ -119,8 +119,7 @@ function App() {
       const bounds = cropBoardRef.current.getBoundingClientRect()
       const nextX = panInteraction.offsetX + ((event.clientX - panInteraction.startX) / bounds.width) * width
       const nextY = panInteraction.offsetY + ((event.clientY - panInteraction.startY) / bounds.height) * height
-      const limitX = Math.max(1000, width * 2)
-      const limitY = Math.max(1000, height * 2)
+      const { limitX, limitY } = computePanLimits(naturalSize, width, height, zoom, rotation)
       setOffsetX(Math.round(clamp(nextX, -limitX, limitX)))
       setOffsetY(Math.round(clamp(nextY, -limitY, limitY)))
     }
@@ -131,7 +130,7 @@ function App() {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', stopInteraction)
     }
-  }, [panInteraction, width, height])
+  }, [panInteraction, width, height, zoom, rotation, naturalSize])
 
   const createImageItem = (file: File) => new Promise<ImageItem>((resolve, reject) => {
     if (!file.type.startsWith('image/')) {
@@ -276,7 +275,13 @@ function App() {
   const startPanInteraction = (event: ReactPointerEvent) => {
     if (!imageUrl || cropMode) return
     event.preventDefault()
-    setPanInteraction({ startX: event.clientX, startY: event.clientY, offsetX, offsetY })
+    const { limitX, limitY } = computePanLimits(naturalSize, width, height, zoom, rotation)
+    setPanInteraction({
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: clamp(offsetX, -limitX, limitX),
+      offsetY: clamp(offsetY, -limitY, limitY),
+    })
   }
 
   const applyCrop = () => {
@@ -447,7 +452,9 @@ function App() {
       const visualHeight = swapped ? image.naturalWidth : image.naturalHeight
       const coverScale = Math.max(width / visualWidth, height / visualHeight)
       const scale = coverScale * (zoom / 100)
-      ctx.translate(width / 2 + offsetX, height / 2 + offsetY)
+      const limitX = Math.max(0, (visualWidth * scale - width) / 2)
+      const limitY = Math.max(0, (visualHeight * scale - height) / 2)
+      ctx.translate(width / 2 + clamp(offsetX, -limitX, limitX), height / 2 + clamp(offsetY, -limitY, limitY))
       ctx.rotate((rotation * Math.PI) / 180)
       ctx.scale(flipX ? -scale : scale, flipY ? -scale : scale)
       ctx.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2)
@@ -462,10 +469,13 @@ function App() {
   }
 
   const aspectRatio = `${width} / ${height}`
-  const positionLimitX = Math.max(1000, width * 2)
-  const positionLimitY = Math.max(1000, height * 2)
-  const previewOffsetX = width ? (offsetX / width) * 100 : 0
-  const previewOffsetY = height ? (offsetY / height) * 100 : 0
+  const panLimits = computePanLimits(naturalSize, width, height, zoom, rotation)
+  const positionLimitX = Math.round(panLimits.limitX)
+  const positionLimitY = Math.round(panLimits.limitY)
+  const safeOffsetX = clamp(offsetX, -positionLimitX, positionLimitX)
+  const safeOffsetY = clamp(offsetY, -positionLimitY, positionLimitY)
+  const previewOffsetX = width ? (safeOffsetX / width) * 100 : 0
+  const previewOffsetY = height ? (safeOffsetY / height) * 100 : 0
   const transform = `translate(calc(-50% + ${previewOffsetX}%), calc(-50% + ${previewOffsetY}%)) rotate(${rotation}deg) scale(${(zoom / 100) * (flipX ? -1 : 1)}, ${(zoom / 100) * (flipY ? -1 : 1)})`
 
   return (
@@ -623,8 +633,8 @@ function App() {
               </div>
             </div>
             <RangeControl id="zoom" label="圖片縮放" value={zoom} min={1} max={250} suffix="%" onChange={setZoom} />
-            <RangeControl id="position-x" label="水平位置" value={offsetX} min={-positionLimitX} max={positionLimitX} suffix=" px" onChange={setOffsetX} />
-            <RangeControl id="position-y" label="垂直位置" value={offsetY} min={-positionLimitY} max={positionLimitY} suffix=" px" onChange={setOffsetY} />
+            <RangeControl id="position-x" label="水平位置" value={safeOffsetX} min={-positionLimitX} max={positionLimitX} suffix=" px" onChange={setOffsetX} hint="此方向已填滿，放大「圖片縮放」即可左右微調。" />
+            <RangeControl id="position-y" label="垂直位置" value={safeOffsetY} min={-positionLimitY} max={positionLimitY} suffix=" px" onChange={setOffsetY} hint="此方向已填滿，放大「圖片縮放」即可上下微調。" />
           </section>
 
           <section className="export-settings">
@@ -647,11 +657,13 @@ function App() {
   )
 }
 
-function RangeControl({ id, label, value, min, max, suffix, onChange }: { id: string; label: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) {
+function RangeControl({ id, label, value, min, max, suffix, onChange, hint }: { id: string; label: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void; hint?: string }) {
+  const locked = min === max
   return (
     <div className="form-group range-group">
       <div className="label-row"><label htmlFor={id}>{label}</label><output htmlFor={id}>{value}{suffix}</output></div>
-      <input id={id} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      <input id={id} type="range" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} disabled={locked} />
+      {hint && locked && <small className="range-hint">{hint}</small>}
     </div>
   )
 }
@@ -726,6 +738,27 @@ function resizeCrop(rect: CropRect, handle: CropHandle, dx: number, dy: number):
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
+}
+
+// 計算「不露白」的最大平移量（輸出像素）：圖片以 cover 填滿輸出框並套用縮放後，
+// 邊緣最多只能拖到貼齊框邊。cover 正好貼齊的那一軸餘量為 0，需放大縮放才有移動空間。
+function computePanLimits(
+  natural: { width: number; height: number },
+  width: number,
+  height: number,
+  zoom: number,
+  rotation: number,
+) {
+  if (!natural.width || !natural.height || !width || !height) return { limitX: 0, limitY: 0 }
+  const swapped = Math.abs(rotation % 180) === 90
+  const visualWidth = swapped ? natural.height : natural.width
+  const visualHeight = swapped ? natural.width : natural.height
+  const coverScale = Math.max(width / visualWidth, height / visualHeight)
+  const scale = coverScale * (zoom / 100)
+  return {
+    limitX: Math.max(0, (visualWidth * scale - width) / 2),
+    limitY: Math.max(0, (visualHeight * scale - height) / 2),
+  }
 }
 
 export default App
